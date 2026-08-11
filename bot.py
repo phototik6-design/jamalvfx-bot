@@ -2,6 +2,7 @@
 """
 ربات تلگرام jamalvfx
 نمایش تعرفه‌های طراحی کاور و اکولایزر + ثبت سفارش مشتری و ارسال آن به ادمین
++ قابلیت سفارش مجدد و پیگیری سفارش
 
 نحوه اجرا:
     1) pip install -r requirements.txt
@@ -11,6 +12,8 @@
 
 import logging
 import os
+import json
+from datetime import datetime
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -40,6 +43,9 @@ CARD_NUMBER = "6219-8619-1625-5325"
 CARD_HOLDER = "جمال محمدی"
 CHANNEL_USERNAME = "Jamalvfxx"      # بدون @
 INSTAGRAM_USERNAME = "jamalvfx_"    # بدون @
+
+# فایل ذخیره سفارش‌ها
+ORDERS_FILE = "orders.json"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -101,6 +107,73 @@ SERVICES = {
 
 # مراحل مکالمه برای ثبت سفارش
 ASK_NAME, ASK_PHONE, ASK_DETAILS, CONFIRM, ASK_RECEIPT = range(5)
+ASK_MODIFY_DETAILS, CONFIRM_REORDER = range(5, 7)
+
+
+# ---------------------------------------------------------------------------
+# توابع کمکی برای مدیریت سفارش‌ها
+# ---------------------------------------------------------------------------
+def load_orders():
+    """بارگیری سفارش‌ها از فایل JSON"""
+    if os.path.exists(ORDERS_FILE):
+        try:
+            with open(ORDERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+
+def save_orders(orders):
+    """ذخیره‌سازی سفارش‌ها در فایل JSON"""
+    with open(ORDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(orders, f, ensure_ascii=False, indent=2)
+
+
+def get_user_orders(user_id):
+    """دریافت تمام سفارش‌های یک کاربر"""
+    orders = load_orders()
+    user_orders = []
+    for order_id, order_data in orders.items():
+        if order_data.get("user_id") == user_id:
+            user_orders.append((order_id, order_data))
+    return sorted(user_orders, key=lambda x: x[1].get("date", ""), reverse=True)
+
+
+def create_order_id():
+    """ایجاد شناسه‌ی منحصربه‌فرد برای سفارش"""
+    import time
+    return f"ORD_{int(time.time())}"
+
+
+def save_order(order_data):
+    """ذخیره‌سازی یک سفارش جدید"""
+    orders = load_orders()
+    order_id = create_order_id()
+    order_data["date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    order_data["status"] = "pending"  # pending, confirmed, in_progress, completed
+    orders[order_id] = order_data
+    save_orders(orders)
+    return order_id
+
+
+def get_order(order_id):
+    """دریافت اطلاعات یک سفارش"""
+    orders = load_orders()
+    return orders.get(order_id)
+
+
+def update_order_status(order_id, status, message=""):
+    """به‌روزرسانی وضعیت سفارش"""
+    orders = load_orders()
+    if order_id in orders:
+        orders[order_id]["status"] = status
+        if message:
+            orders[order_id]["status_message"] = message
+        orders[order_id]["status_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_orders(orders)
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +183,10 @@ def main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton(SERVICES["cover"]["title"], callback_data="cat_cover")],
         [InlineKeyboardButton(SERVICES["eq"]["title"], callback_data="cat_eq")],
+        [
+            InlineKeyboardButton("🔄 سفارش مجدد", callback_data="reorder"),
+            InlineKeyboardButton("📦 پیگیری", callback_data="track"),
+        ],
         [
             InlineKeyboardButton("📢 کانال", url=f"https://t.me/{CHANNEL_USERNAME}"),
             InlineKeyboardButton("📸 اینستاگرام", url=f"https://instagram.com/{INSTAGRAM_USERNAME}"),
@@ -136,6 +213,60 @@ def tier_detail_keyboard(tier_key):
     return InlineKeyboardMarkup(keyboard)
 
 
+def reorder_keyboard(user_orders):
+    """منوی سفارش‌های قبلی"""
+    if not user_orders:
+        return None
+    
+    buttons = []
+    for order_id, order_data in user_orders[:5]:  # فقط آخرین 5 سفارش
+        package = order_data.get("package", "نامشخص")
+        date = order_data.get("date", "").split()[0]
+        status = order_data.get("status", "pending")
+        status_emoji = {
+            "pending": "⏳",
+            "confirmed": "✅",
+            "in_progress": "🔄",
+            "completed": "✔️"
+        }.get(status, "❓")
+        
+        buttons.append(
+            [InlineKeyboardButton(
+                f"{status_emoji} {package[:20]}... ({date})",
+                callback_data=f"reorder_{order_id}"
+            )]
+        )
+    buttons.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_main")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def track_keyboard(user_orders):
+    """منوی پیگیری سفارش‌ها"""
+    if not user_orders:
+        return None
+    
+    buttons = []
+    for order_id, order_data in user_orders[:5]:  # فقط آخرین 5 سفارش
+        package = order_data.get("package", "نامشخص")
+        date = order_data.get("date", "").split()[0]
+        status = order_data.get("status", "pending")
+        status_emoji = {
+            "pending": "⏳",
+            "confirmed": "✅",
+            "in_progress": "🔄",
+            "completed": "✔️"
+        }.get(status, "❓")
+        
+        buttons.append(
+            [InlineKeyboardButton(
+                f"{status_emoji} {package[:20]}... ({date})",
+                callback_data=f"track_{order_id}"
+            )]
+        )
+    buttons.append([InlineKeyboardButton("⬅️ بازگشت", callback_data="back_main")])
+    return InlineKeyboardMarkup(buttons)
+
+
 def find_tier(tier_key):
     for cat in SERVICES.values():
         if tier_key in cat["tiers"]:
@@ -150,7 +281,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "سلام 👋\n"
         "به ربات *jamalvfx* خوش اومدی!\n\n"
-        "یکی از خدمات زیر رو انتخاب کن تا تعرفه‌ها رو ببینی:"
+        "یکی از گزینه‌های زیر رو انتخاب کن:"
     )
     await update.message.reply_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
@@ -162,9 +293,157 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "back_main":
         await query.edit_message_text(
-            "یکی از خدمات زیر رو انتخاب کن تا تعرفه‌ها رو ببینی:",
+            "یکی از گزینه‌های زیر رو انتخاب کن:",
             reply_markup=main_menu_keyboard(),
         )
+        return
+
+    if data == "reorder":
+        user_id = query.from_user.id
+        user_orders = get_user_orders(user_id)
+        
+        if not user_orders:
+            await query.edit_message_text(
+                "تاکنون سفارشی ثبت نکرده‌ای. یک سفارش جدید انتخاب کن 😊",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+        
+        reorder_kb = reorder_keyboard(user_orders)
+        await query.edit_message_text(
+            "🔄 *سفارش‌های قبلی*\n\nیکی رو برای سفارش مجدد انتخاب کن:",
+            reply_markup=reorder_kb,
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "track":
+        user_id = query.from_user.id
+        user_orders = get_user_orders(user_id)
+        
+        if not user_orders:
+            await query.edit_message_text(
+                "تاکنون سفارشی ثبت نکرده‌ای.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+        
+        track_kb = track_keyboard(user_orders)
+        await query.edit_message_text(
+            "📦 *وضعیت سفارش‌های من*\n\nیکی رو انتخاب کن تا وضعیت رو ببینی:",
+            reply_markup=track_kb,
+            parse_mode="Markdown"
+        )
+        return
+
+    if data.startswith("track_"):
+        order_id = data.split("_", 1)[1]
+        order = get_order(order_id)
+        
+        if not order:
+            await query.answer("سفارش پیدا نشد!", show_alert=True)
+            return
+        
+        status_text = {
+            "pending": "⏳ در انتظار تأیید",
+            "confirmed": "✅ تأیید شده",
+            "in_progress": "🔄 در حال انجام",
+            "completed": "✔️ تکمیل شده"
+        }.get(order.get("status", "pending"), "نامشخص")
+        
+        track_text = (
+            f"📋 *پیگیری سفارش*\n\n"
+            f"🆔 شناسه: `{order_id}`\n"
+            f"📦 پکیج: {order.get('package')}\n"
+            f"📞 شماره: {order.get('phone')}\n"
+            f"📅 تاریخ: {order.get('date')}\n"
+            f"💰 مبلغ: {order.get('price')}\n\n"
+            f"*وضعیت:* {status_text}\n"
+        )
+        
+        if order.get("status_message"):
+            track_text += f"📝 پیام: {order.get('status_message')}\n"
+        
+        track_text += f"🔄 آپدیت شده: {order.get('status_updated', '-')}"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"refresh_track_{order_id}")],
+            [InlineKeyboardButton("⬅️ بازگشت", callback_data="track")]
+        ])
+        
+        await query.edit_message_text(track_text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    if data.startswith("refresh_track_"):
+        order_id = data.split("_", 2)[2]
+        order = get_order(order_id)
+        
+        if not order:
+            await query.answer("سفارش پیدا نشد!", show_alert=True)
+            return
+        
+        status_text = {
+            "pending": "⏳ در انتظار تأیید",
+            "confirmed": "✅ تأیید شده",
+            "in_progress": "🔄 در حال انجام",
+            "completed": "✔️ تکمیل شده"
+        }.get(order.get("status", "pending"), "نامشخص")
+        
+        track_text = (
+            f"📋 *پیگیری سفارش*\n\n"
+            f"🆔 شناسه: `{order_id}`\n"
+            f"📦 پکیج: {order.get('package')}\n"
+            f"📞 شماره: {order.get('phone')}\n"
+            f"📅 تاریخ: {order.get('date')}\n"
+            f"💰 مبلغ: {order.get('price')}\n\n"
+            f"*وضعیت:* {status_text}\n"
+        )
+        
+        if order.get("status_message"):
+            track_text += f"📝 پیام: {order.get('status_message')}\n"
+        
+        track_text += f"🔄 آپدیت شده: {order.get('status_updated', '-')}"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"refresh_track_{order_id}")],
+            [InlineKeyboardButton("⬅️ بازگشت", callback_data="track")]
+        ])
+        
+        await query.edit_message_text(track_text, reply_markup=keyboard, parse_mode="Markdown")
+        await query.answer("✅ بروزرسانی شد")
+        return
+
+    if data.startswith("reorder_"):
+        order_id = data.split("_", 1)[1]
+        old_order = get_order(order_id)
+        
+        if not old_order:
+            await query.answer("سفارش پیدا نشد!", show_alert=True)
+            return
+        
+        context.user_data["reorder"] = {
+            "old_order_id": order_id,
+            "package": old_order.get("package"),
+            "price": old_order.get("price"),
+            "old_details": old_order.get("details"),
+            "name": old_order.get("name"),
+            "phone": old_order.get("phone"),
+        }
+        
+        summary = (
+            f"🔄 *سفارش مجدد*\n\n"
+            f"📦 پکیج: {old_order.get('package')} ({old_order.get('price')})\n"
+            f"📝 توضیحات قبلی: {old_order.get('details')}\n\n"
+            "می‌خوای توضیحات رو تغییر بدی یا همینطور ثبت کنم؟"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ ویرایش توضیحات", callback_data="modify_details")],
+            [InlineKeyboardButton("✅ همینطور ثبت کن", callback_data="confirm_reorder_same")],
+            [InlineKeyboardButton("❌ انصراف", callback_data="back_main")],
+        ])
+        
+        await query.edit_message_text(summary, reply_markup=keyboard, parse_mode="Markdown")
         return
 
     if data.startswith("cat_"):
@@ -195,6 +474,8 @@ async def order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["order"] = {
         "package": tier["name"],
         "price": tier["price"],
+        "user_id": query.from_user.id,
+        "username": query.from_user.username or query.from_user.id,
     }
     await query.edit_message_text(
         f"عالیه! پکیج انتخابی: *{tier['name']}* ({tier['price']})\n\n"
@@ -266,9 +547,13 @@ async def finalize_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order = context.user_data.get("order", {})
     user = query.from_user
 
+    # ذخیره‌سازی سفارش
+    order_id = save_order(order)
+
     # ارسال سفارش برای ادمین
     admin_text = (
         "🆕 *سفارش جدید*\n\n"
+        f"🆔 شناسه: `{order_id}`\n"
         f"👤 نام: {order.get('name')}\n"
         f"📞 شماره: {order.get('phone')}\n"
         f"📦 پکیج: {order.get('package')} ({order.get('price')})\n"
@@ -283,6 +568,7 @@ async def finalize_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     payment_text = (
         "✅ سفارشت ثبت شد!\n\n"
+        f"🆔 شناسه سفارش: `{order_id}`\n\n"
         "💳 *اطلاعات پرداخت*\n"
         f"شماره کارت: `{CARD_NUMBER}`\n"
         f"به نام: {CARD_HOLDER}\n"
@@ -323,13 +609,131 @@ async def receipt_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ASK_RECEIPT
 
 
+# --------------------- مکالمه‌ی سفارش مجدد ---------------------
+async def modify_reorder_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "توضیحات جدید رو بنویس:\n\n💡 نکته: اگر کاری نمی‌خوای تغییر بدی، همان توضیحات قبلی رو بنویس"
+    )
+    return ASK_MODIFY_DETAILS
+
+
+async def get_new_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["reorder"]["details"] = update.message.text
+    reorder = context.user_data["reorder"]
+    
+    summary = (
+        "📋 *خلاصه سفارش مجدد*\n\n"
+        f"📦 پکیج: {reorder['package']} ({reorder['price']})\n"
+        f"👤 نام: {reorder['name']}\n"
+        f"📞 شماره: {reorder['phone']}\n"
+        f"📝 توضیحات جدید: {reorder['details']}\n\n"
+        "آیا سفارش مجدد رو ثبت کنم؟"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ بله، ثبت کن", callback_data="confirm_reorder_yes")],
+            [InlineKeyboardButton("❌ انصراف", callback_data="back_main")],
+        ]
+    )
+    await update.message.reply_text(summary, reply_markup=keyboard, parse_mode="Markdown")
+    return CONFIRM_REORDER
+
+
+async def finalize_reorder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "confirm_reorder_same":
+        reorder = context.user_data.get("reorder", {})
+        reorder["details"] = reorder.get("old_details", "")
+    else:
+        reorder = context.user_data.get("reorder", {})
+    
+    user = query.from_user
+    
+    # ایجاد سفارش جدید
+    new_order_data = {
+        "package": reorder.get("package"),
+        "price": reorder.get("price"),
+        "name": reorder.get("name"),
+        "phone": reorder.get("phone"),
+        "details": reorder.get("details"),
+        "user_id": user.id,
+        "username": user.username or user.id,
+        "reorder_from": reorder.get("old_order_id"),
+    }
+    
+    order_id = save_order(new_order_data)
+    
+    # ارسال برای ادمین
+    admin_text = (
+        "🔄 *سفارش مجدد*\n\n"
+        f"🆔 شناسه جدید: `{order_id}`\n"
+        f"🔗 سفارش قبلی: `{reorder.get('old_order_id')}`\n"
+        f"👤 نام: {reorder.get('name')}\n"
+        f"📞 شماره: {reorder.get('phone')}\n"
+        f"📦 پکیج: {reorder.get('package')} ({reorder.get('price')})\n"
+        f"📝 توضیحات: {reorder.get('details')}\n\n"
+        f"👥 تلگرام: @{user.username if user.username else user.id}\n\n"
+        "⏳ در انتظار رسید پرداخت..."
+    )
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("ارسال سفارش مجدد به ادمین با خطا: %s", e)
+    
+    payment_text = (
+        "✅ سفارش مجدد ثبت شد!\n\n"
+        f"🆔 شناسه: `{order_id}`\n\n"
+        "💳 *اطلاعات پرداخت*\n"
+        f"شماره کارت: `{CARD_NUMBER}`\n"
+        f"به نام: {CARD_HOLDER}\n"
+        f"مبلغ: {reorder.get('price')}\n\n"
+        "بعد از واریز، لطفاً *عکس رسید* رو برام بفرست 🙏"
+    )
+    await query.edit_message_text(payment_text, parse_mode="Markdown")
+    
+    context.user_data.pop("reorder", None)
+    return ConversationHandler.END
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "سفارش لغو شد. هر وقت خواستی دوباره از /start شروع کن 🙂",
         reply_markup=ReplyKeyboardRemove(),
     )
     context.user_data.pop("order", None)
+    context.user_data.pop("reorder", None)
     return ConversationHandler.END
+
+
+# --------------------- دستورات مدیریت (تنها ادمین) ---------------------
+async def admin_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش سفارش‌های در انتظار برای ادمین"""
+    user_id = update.effective_user.id
+    if user_id != int(ADMIN_CHAT_ID):
+        await update.message.reply_text("شما اجازه دسترسی ندارید.")
+        return
+    
+    orders = load_orders()
+    pending_orders = [(oid, od) for oid, od in orders.items() if od.get("status") == "pending"]
+    
+    if not pending_orders:
+        await update.message.reply_text("هیچ سفارش در انتظار وجود ندارد.")
+        return
+    
+    text = "📋 *سفارش‌های در انتظار*\n\n"
+    for order_id, order_data in pending_orders[-10:]:  # آخرین 10 سفارش
+        text += (
+            f"🆔 {order_id}\n"
+            f"👤 {order_data.get('name')} - {order_data.get('phone')}\n"
+            f"📦 {order_data.get('package')}\n"
+            f"📅 {order_data.get('date')}\n\n"
+        )
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +747,7 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # مکالمه‌ی سفارش
     order_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_start, pattern=r"^order_")],
         states={
@@ -358,9 +763,25 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    # مکالمه‌ی سفارش مجدد
+    reorder_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(modify_reorder_details, pattern=r"^modify_details")],
+        states={
+            ASK_MODIFY_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_new_details)],
+            CONFIRM_REORDER: [CallbackQueryHandler(finalize_reorder, pattern=r"^confirm_reorder_")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("pending", admin_pending))
     app.add_handler(order_conv)
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(cat_|back_main|tier_)"))
+    app.add_handler(reorder_conv)
+    app.add_handler(CallbackQueryHandler(
+        finalize_reorder,
+        pattern=r"^confirm_reorder_(same|yes)"
+    ))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(cat_|back_main|tier_|reorder|track|track_|refresh_track_|reorder_|modify_details)"))
 
     logger.info("ربات در حال اجراست...")
     app.run_polling()
