@@ -33,7 +33,14 @@ from telegram.ext import (
 # تنظیمات — این دو مقدار را حتماً پر کنید
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "PUT_YOUR_CHAT_ID_HERE")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "PUT_YOUR_CHAT_ID_HERE")  # آیدی عددی چت خودتان
+
+# اطلاعات پرداخت و لینک‌ها
+CARD_NUMBER = "6219-8619-1625-5325"
+CARD_HOLDER = "جمال محمدی"
+CHANNEL_USERNAME = "Jamalvfxx"      # بدون @
+INSTAGRAM_USERNAME = "jamalvfx_"    # بدون @
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -93,7 +100,7 @@ SERVICES = {
 }
 
 # مراحل مکالمه برای ثبت سفارش
-ASK_NAME, ASK_PHONE, ASK_DETAILS, CONFIRM = range(4)
+ASK_NAME, ASK_PHONE, ASK_DETAILS, CONFIRM, ASK_RECEIPT = range(5)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +110,10 @@ def main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton(SERVICES["cover"]["title"], callback_data="cat_cover")],
         [InlineKeyboardButton(SERVICES["eq"]["title"], callback_data="cat_eq")],
+        [
+            InlineKeyboardButton("📢 کانال", url=f"https://t.me/{CHANNEL_USERNAME}"),
+            InlineKeyboardButton("📸 اینستاگرام", url=f"https://instagram.com/{INSTAGRAM_USERNAME}"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -262,18 +273,54 @@ async def finalize_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📞 شماره: {order.get('phone')}\n"
         f"📦 پکیج: {order.get('package')} ({order.get('price')})\n"
         f"📝 توضیحات: {order.get('details')}\n\n"
-        f"🔗 آیدی تلگرام مشتری: @{user.username if user.username else user.id}"
+        f"🔗 آیدی تلگرام مشتری: @{user.username if user.username else user.id}\n\n"
+        "⏳ در انتظار ارسال رسید پرداخت..."
     )
     try:
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, parse_mode="Markdown")
     except Exception as e:
         logger.error("ارسال پیام به ادمین با خطا مواجه شد: %s", e)
 
-    await query.edit_message_text(
-        "✅ سفارشت با موفقیت ثبت شد!\nبه‌زودی از طریق تلگرام یا اینستاگرام باهات هماهنگ می‌کنیم. ممنون 🙏"
+    payment_text = (
+        "✅ سفارشت ثبت شد!\n\n"
+        "💳 *اطلاعات پرداخت*\n"
+        f"شماره کارت: `{CARD_NUMBER}`\n"
+        f"به نام: {CARD_HOLDER}\n"
+        f"مبلغ: {order.get('price')}\n\n"
+        "بعد از واریز، لطفاً *عکس رسید* پرداخت رو همینجا برام بفرست تا سفارش تأیید بشه 🙏"
+    )
+    await query.edit_message_text(payment_text, parse_mode="Markdown")
+    return ASK_RECEIPT
+
+
+async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    order = context.user_data.get("order", {})
+    user = update.effective_user
+
+    caption = (
+        "🧾 *رسید پرداخت*\n\n"
+        f"👤 نام: {order.get('name')}\n"
+        f"📞 شماره: {order.get('phone')}\n"
+        f"📦 پکیج: {order.get('package')} ({order.get('price')})\n"
+        f"🔗 آیدی تلگرام مشتری: @{user.username if user.username else user.id}"
+    )
+
+    try:
+        photo_file_id = update.message.photo[-1].file_id
+        await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo_file_id, caption=caption, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("ارسال رسید به ادمین با خطا مواجه شد: %s", e)
+
+    await update.message.reply_text(
+        "🎉 رسید دریافت شد و برای بررسی ارسال شد.\nبه‌زودی از طریق تلگرام یا اینستاگرام باهات هماهنگ می‌کنیم. ممنون 🙏"
     )
     context.user_data.pop("order", None)
     return ConversationHandler.END
+
+
+async def receipt_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("لطفاً فقط *عکس رسید* پرداخت رو بفرست 📸", parse_mode="Markdown")
+    return ASK_RECEIPT
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -303,6 +350,10 @@ def main():
             ASK_PHONE: [MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, ask_details)],
             ASK_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order)],
             CONFIRM: [CallbackQueryHandler(finalize_order, pattern=r"^confirm_")],
+            ASK_RECEIPT: [
+                MessageHandler(filters.PHOTO, receive_receipt),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_reminder),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
