@@ -32,9 +32,8 @@ from telegram.ext import (
 # ---------------------------------------------------------------------------
 # تنظیمات — این دو مقدار را حتماً پر کنید
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8276504184:AAF1NYhK-firHnK437PC_WyUB1kSjuuJ0Qs")
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "5677983210")  # آیدی عددی چت خودتان
-
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "PUT_YOUR_CHAT_ID_HERE")
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
