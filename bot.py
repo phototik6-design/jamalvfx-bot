@@ -107,7 +107,7 @@ SERVICES = {
 
 # مراحل مکالمه برای ثبت سفارش
 ASK_NAME, ASK_PHONE, ASK_DETAILS, CONFIRM, ASK_RECEIPT = range(5)
-ASK_MODIFY_DETAILS, CONFIRM_REORDER = range(5, 7)
+ASK_MODIFY_DETAILS, CONFIRM_REORDER, ASK_REORDER_RECEIPT = range(5, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -597,8 +597,14 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error("ارسال رسید به ادمین با خطا مواجه شد: %s", e)
 
+    final_message = (
+        "🎉 رسید دریافت شد و برای بررسی ارسال شد.\n"
+        "به‌زودی از طریق تلگرام یا اینستاگرام باهات هماهنگ می‌کنیم. ممنون 🙏\n\n"
+        "برای سفارش‌های دیگر یا پیگیری، گزینه‌های پایین رو استفاده کن:"
+    )
     await update.message.reply_text(
-        "🎉 رسید دریافت شد و برای بررسی ارسال شد.\nبه‌زودی از طریق تلگرام یا اینستاگرام باهات هماهنگ می‌کنیم. ممنون 🙏"
+        final_message,
+        reply_markup=main_menu_keyboard()
     )
     context.user_data.pop("order", None)
     return ConversationHandler.END
@@ -607,6 +613,44 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receipt_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("لطفاً فقط *عکس رسید* پرداخت رو بفرست 📸", parse_mode="Markdown")
     return ASK_RECEIPT
+
+
+async def receive_reorder_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت رسید برای سفارش مجدد"""
+    reorder = context.user_data.get("reorder", {})
+    user = update.effective_user
+
+    caption = (
+        "🧾 *رسید پرداخت (سفارش مجدد)*\n\n"
+        f"👤 نام: {reorder.get('name')}\n"
+        f"📞 شماره: {reorder.get('phone')}\n"
+        f"📦 پکیج: {reorder.get('package')} ({reorder.get('price')})\n"
+        f"🔗 آیدی تلگرام مشتری: @{user.username if user.username else user.id}"
+    )
+
+    try:
+        photo_file_id = update.message.photo[-1].file_id
+        await context.bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo_file_id, caption=caption, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("ارسال رسید سفارش مجدد به ادمین با خطا: %s", e)
+
+    final_message = (
+        "🎉 رسید دریافت شد و برای بررسی ارسال شد.\n"
+        "به‌زودی از طریق تلگرام یا اینستاگرام باهات هماهنگ می‌کنیم. ممنون 🙏\n\n"
+        "برای سفارش‌های دیگر یا پیگیری، گزینه‌های پایین رو استفاده کن:"
+    )
+    await update.message.reply_text(
+        final_message,
+        reply_markup=main_menu_keyboard()
+    )
+    context.user_data.pop("reorder", None)
+    return ConversationHandler.END
+
+
+async def reorder_receipt_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """یادآوری برای دریافت رسید سفارش مجدد"""
+    await update.message.reply_text("لطفاً فقط *عکس رسید* پرداخت رو بفرست 📸", parse_mode="Markdown")
+    return CONFIRM_REORDER
 
 
 # --------------------- مکالمه‌ی سفارش مجدد ---------------------
@@ -694,15 +738,18 @@ async def finalize_reorder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "بعد از واریز، لطفاً *عکس رسید* رو برام بفرست 🙏"
     )
     await query.edit_message_text(payment_text, parse_mode="Markdown")
-    
-    context.user_data.pop("reorder", None)
-    return ConversationHandler.END
+    return ASK_REORDER_RECEIPT
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سفارش لغو شد. هر وقت خواستی دوباره از /start شروع کن 🙂",
+        "سفارش لغو شد. یکی از گزینه‌های زیر رو انتخاب کن 🙂",
         reply_markup=ReplyKeyboardRemove(),
+    )
+    # نمایش منوی اصلی
+    await update.message.reply_text(
+        "بازگشت به منوی اصلی:",
+        reply_markup=main_menu_keyboard(),
     )
     context.user_data.pop("order", None)
     context.user_data.pop("reorder", None)
@@ -760,28 +807,37 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_reminder),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start),
+        ],
     )
 
     # مکالمه‌ی سفارش مجدد
     reorder_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(modify_reorder_details, pattern=r"^modify_details")],
+        entry_points=[
+            CallbackQueryHandler(modify_reorder_details, pattern=r"^modify_details"),
+            CallbackQueryHandler(finalize_reorder, pattern=r"^confirm_reorder_same"),
+        ],
         states={
             ASK_MODIFY_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_new_details)],
             CONFIRM_REORDER: [CallbackQueryHandler(finalize_reorder, pattern=r"^confirm_reorder_")],
+            ASK_REORDER_RECEIPT: [
+                MessageHandler(filters.PHOTO, receive_reorder_receipt),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, reorder_receipt_reminder),
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start),
+        ],
     )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("pending", admin_pending))
     app.add_handler(order_conv)
     app.add_handler(reorder_conv)
-    app.add_handler(CallbackQueryHandler(
-        finalize_reorder,
-        pattern=r"^confirm_reorder_(same|yes)"
-    ))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(cat_|back_main|tier_|reorder|track|track_|refresh_track_|reorder_|modify_details)"))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(cat_|back_main|tier_|reorder|track|refresh_track_|reorder_|track_)"))
 
     logger.info("ربات در حال اجراست...")
     app.run_polling()
